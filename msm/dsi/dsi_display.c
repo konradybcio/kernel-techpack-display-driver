@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/list.h>
@@ -20,6 +20,10 @@
 #include "dsi_pwr.h"
 #include "sde_dbg.h"
 #include "dsi_parser.h"
+
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+#include "dsi_panel_driver.h"
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 #define to_dsi_display(x) container_of(x, struct dsi_display, host)
 #define INT_BASE_10 10
@@ -45,7 +49,11 @@ static struct dsi_display_boot_param boot_displays[MAX_DSI_ACTIVE_DISPLAY] = {
 };
 
 static const struct of_device_id dsi_display_dt_match[] = {
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	{.compatible = "somc,dsi-display"},
+#else
 	{.compatible = "qcom,dsi-display"},
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 	{}
 };
 
@@ -55,6 +63,13 @@ bool is_skip_op_required(struct dsi_display *display)
 		return false;
 
 	return (display->is_cont_splash_enabled || display->trusted_vm_env);
+}
+
+static struct dsi_display *main_display;
+
+struct dsi_display *dsi_display_get_main_display(void)
+{
+	return main_display;
 }
 
 static void dsi_display_mask_ctrl_error_interrupts(struct dsi_display *display,
@@ -241,6 +256,10 @@ int dsi_display_set_backlight(struct drm_connector *connector,
 		goto error;
 	}
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	dsi_panel_driver_panel_update_area(panel, (u32)bl_temp);
+#endif  /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+	SDE_EVT32(0x1111);
 	rc = dsi_panel_set_backlight(panel, (u32)bl_temp);
 	if (rc)
 		DSI_ERR("unable to set backlight\n");
@@ -258,7 +277,11 @@ error:
 	return rc;
 }
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+int dsi_display_cmd_engine_enable(struct dsi_display *display)
+#else
 static int dsi_display_cmd_engine_enable(struct dsi_display *display)
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 {
 	int rc = 0;
 	int i;
@@ -306,7 +329,11 @@ done:
 	return rc;
 }
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+int dsi_display_cmd_engine_disable(struct dsi_display *display)
+#else
 static int dsi_display_cmd_engine_disable(struct dsi_display *display)
+#endif  /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 {
 	int rc = 0;
 	int i;
@@ -595,6 +622,9 @@ static bool dsi_display_validate_reg_read(struct dsi_panel *panel)
 	for (i = 0; i < count; i++)
 		len += lenp[i];
 
+	for (i = 0; i < len; i++)
+		j += len;
+
 	for (j = 0; j < config->groups; ++j) {
 		for (i = 0; i < len; ++i) {
 			if (config->return_buf[i] !=
@@ -753,6 +783,9 @@ static int dsi_display_status_reg_read(struct dsi_display *display)
 		return -EPERM;
 	}
 
+	if (display->ctrl_count > 1)
+		dsi_ctrl_clear_slave_broadcast(display->ctrl[1].ctrl);
+
 	rc = dsi_display_validate_status(m_ctrl, display->panel);
 	if (rc <= 0) {
 		DSI_ERR("[%s] read status failed on master,rc=%d\n",
@@ -767,6 +800,9 @@ static int dsi_display_status_reg_read(struct dsi_display *display)
 		ctrl = &display->ctrl[i];
 		if (ctrl == m_ctrl)
 			continue;
+
+		if (display->ctrl_count > 1)
+			dsi_ctrl_clear_slave_broadcast(display->ctrl[1].ctrl);
 
 		rc = dsi_display_validate_status(ctrl, display->panel);
 		if (rc <= 0) {
@@ -995,6 +1031,8 @@ static int dsi_display_cmd_rx(struct dsi_display *display,
 			 (display->enabled)))
 		flags |= DSI_CTRL_CMD_CUSTOM_DMA_SCHED;
 
+	if (display->ctrl_count > 1)
+		dsi_ctrl_clear_slave_broadcast(display->ctrl[1].ctrl);
 	rc = dsi_ctrl_cmd_transfer(m_ctrl->ctrl, &cmd->msg, &flags);
 	if (rc <= 0)
 		DSI_ERR("rx cmd transfer failed rc = %d\n", rc);
@@ -1025,7 +1063,6 @@ int dsi_display_cmd_transfer(struct drm_connector *connector,
 		return -EINVAL;
 	}
 
-	SDE_EVT32(dsi_display->tx_cmd_buf_ndx, cmd_buf_len);
 	DSI_DEBUG("[DSI] Display command transfer\n");
 
 	if ((cmd_buf[1]) || (cmd_buf[3] & MIPI_DSI_MSG_LASTCOMMAND))
@@ -1150,8 +1187,6 @@ int dsi_display_cmd_receive(void *display, const char *cmd_buf,
 		return -EINVAL;
 	}
 
-	SDE_EVT32(cmd_buf_len, recv_buf_len);
-
 	rc = dsi_display_cmd_prepare(cmd_buf, cmd_buf_len,
 			&cmd, cmd_payload, MAX_CMD_PAYLOAD_SIZE);
 	if (rc) {
@@ -1247,22 +1282,12 @@ int dsi_display_set_power(struct drm_connector *connector,
 
 	switch (power_mode) {
 	case SDE_MODE_DPMS_LP1:
-		if (display->panel->power_mode == SDE_MODE_DPMS_LP2) {
-			if (dsi_display_set_ulp_load(display, false) < 0)
-				DSI_WARN("failed to set load for lp1 state\n");
-		}
 		rc = dsi_panel_set_lp1(display->panel);
 		break;
 	case SDE_MODE_DPMS_LP2:
 		rc = dsi_panel_set_lp2(display->panel);
-		if (dsi_display_set_ulp_load(display, true) < 0)
-			DSI_WARN("failed to set load for lp2 state\n");
 		break;
 	case SDE_MODE_DPMS_ON:
-		if (display->panel->power_mode == SDE_MODE_DPMS_LP2) {
-			if (dsi_display_set_ulp_load(display, false) < 0)
-				DSI_WARN("failed to set load for on state\n");
-		}
 		if ((display->panel->power_mode == SDE_MODE_DPMS_LP1) ||
 			(display->panel->power_mode == SDE_MODE_DPMS_LP2))
 			rc = dsi_panel_set_nolp(display->panel);
@@ -1572,7 +1597,7 @@ static ssize_t debugfs_esd_trigger_check(struct file *file,
 						display->trusted_vm_env);
 		if (rc) {
 			DSI_ERR("Failed to trigger ESD attack\n");
-			goto unlock;
+			goto error;
 		}
 	}
 
@@ -2584,7 +2609,7 @@ static int dsi_display_parse_boot_display_selection(void)
 		strlcpy(disp_buf, boot_displays[i].boot_param,
 			MAX_CMDLINE_PARAM_LEN);
 
-		pos = strnstr(disp_buf, ":", strlen(disp_buf));
+		pos = strnstr(disp_buf, ":", MAX_CMDLINE_PARAM_LEN);
 
 		/* Use ':' as a delimiter to retrieve the display name */
 		if (!pos) {
@@ -3304,7 +3329,8 @@ static ssize_t dsi_host_transfer(struct mipi_dsi_host *host,
 		if ((msg->flags & MIPI_DSI_MSG_CMD_DMA_SCHED) &&
 				(display->enabled))
 			cmd_flags |= DSI_CTRL_CMD_CUSTOM_DMA_SCHED;
-
+		if (display->ctrl_count > 1)
+			dsi_ctrl_clear_slave_broadcast(display->ctrl[1].ctrl);
 		rc = dsi_ctrl_cmd_transfer(display->ctrl[ctrl_idx].ctrl, msg,
 				&cmd_flags);
 		if (rc) {
@@ -3914,35 +3940,6 @@ int dsi_pre_clkon_cb(void *priv,
 	return rc;
 }
 
-int dsi_display_set_ulp_load(struct dsi_display *display, bool enable)
-{
-	int i, rc = 0;
-	struct dsi_display_ctrl *display_ctrl;
-	struct dsi_ctrl *ctrl;
-	struct dsi_panel *panel;
-
-	display_for_each_ctrl(i, display) {
-		display_ctrl = &display->ctrl[i];
-		if (!display_ctrl->ctrl)
-			continue;
-		ctrl = display_ctrl->ctrl;
-
-		rc = dsi_pwr_config_vreg_opt_mode(&ctrl->pwr_info.host_pwr, enable);
-		if (rc) {
-			DSI_ERR("failed to set ctrl load\n");
-			return rc;
-		}
-	}
-
-	panel = display->panel;
-	rc = dsi_pwr_config_vreg_opt_mode(&panel->power_info, enable);
-	if (rc) {
-		DSI_ERR("failed to set panel load\n");
-		return rc;
-	}
-	return rc;
-}
-
 static void __set_lane_map_v2(u8 *lane_map_v2,
 	enum dsi_phy_data_lanes lane0,
 	enum dsi_phy_data_lanes lane1,
@@ -4186,6 +4183,14 @@ static int dsi_display_res_init(struct dsi_display *display)
 			goto error_ctrl_put;
 		}
 	}
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	rc = dsi_panel_driver_create_fs(display);
+	if (rc) {
+		pr_err("%s: failed dsi_panel_driver_create_fs rc=%d\n",
+				__func__, rc);
+		return rc;
+	}
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	display->panel = dsi_panel_get(&display->pdev->dev,
 				display->panel_node,
@@ -4208,6 +4213,16 @@ static int dsi_display_res_init(struct dsi_display *display)
 		phy->cfg.phy_type =
 			display->panel->host_config.phy_type;
 	}
+
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	pr_notice("%s: Panel Name = %s\n", __func__, display->panel->name);
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	if (display->boot_disp->boot_disp_en)
+		display->panel->spec_pdata->display_onoff_state = true;
+	dsi_panel_driver_oled_short_det_init_works(display);
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	rc = dsi_display_parse_lane_map(display);
 	if (rc) {
@@ -4664,6 +4679,7 @@ static int _dsi_display_dyn_update_clks(struct dsi_display *display,
 		dsi_phy_dynamic_refresh_clear(ctrl->phy);
 	}
 
+defer_dfps_wait:
 	rc = dsi_clk_update_parent(enable_clk,
 			&display->clock_info.mux_clks);
 	if (rc)
@@ -4695,20 +4711,7 @@ recover_byte_clk:
 exit:
 	dsi_clk_disable_unprepare(&display->clock_info.src_clks);
 
-defer_dfps_wait:
 	return rc;
-}
-
-void dsi_display_dfps_update_parent(struct dsi_display *display)
-{
-	int rc = 0;
-
-	rc = dsi_clk_update_parent(&display->clock_info.src_clks,
-			      &display->clock_info.mux_clks);
-	if (rc)
-		DSI_ERR("could not switch back to src clks %d\n", rc);
-
-	dsi_clk_disable_unprepare(&display->clock_info.src_clks);
 }
 
 static int dsi_display_dynamic_clk_switch_vid(struct dsi_display *display,
@@ -5740,8 +5743,6 @@ error_ctrl_deinit:
 		display_ctrl = &display->ctrl[i];
 		(void)dsi_phy_drv_deinit(display_ctrl->phy);
 		(void)dsi_ctrl_drv_deinit(display_ctrl->ctrl);
-		dsi_ctrl_put(display_ctrl->ctrl);
-		dsi_phy_put(display_ctrl->phy);
 	}
 	(void)dsi_display_debugfs_deinit(display);
 error:
@@ -5850,6 +5851,9 @@ static int dsi_display_init(struct dsi_display *display)
 			return rc;
 		}
 	}
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	dsi_panel_driver_init_area_count(display->panel);
+#endif  /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	rc = component_add(&pdev->dev, &dsi_display_comp_ops);
 	if (rc)
@@ -5959,15 +5963,16 @@ int dsi_display_dev_probe(struct platform_device *pdev)
 	display->pdev = pdev;
 	display->boot_disp = boot_disp;
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	main_display = display;
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 	dsi_display_parse_cmdline_topology(display, index);
 
 	platform_set_drvdata(pdev, display);
 
 	/* initialize display in firmware callback */
-	if (!(boot_displays[DSI_PRIMARY].boot_disp_en ||
-			boot_displays[DSI_SECONDARY].boot_disp_en) &&
-			IS_ENABLED(CONFIG_DSI_PARSER) &&
-			!display->trusted_vm_env) {
+	if (0) {
 		if (!strcmp(display->display_type, "primary"))
 			firm_req = !request_firmware_nowait(
 				THIS_MODULE, 1, "dsi_prop",
@@ -6022,6 +6027,9 @@ int dsi_display_dev_remove(struct platform_device *pdev)
 			ctrl->ctrl->dma_cmd_workq = NULL;
 		}
 	}
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	dsi_panel_driver_deinit_area_count(display->panel);
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	(void)_dsi_display_dev_deinit(display);
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -129,6 +129,10 @@ static char *dp_display_state_name(enum dp_display_states state)
 }
 
 static struct dp_display *g_dp_display;
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+struct device virtualdev;
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 #define HPD_STRING_SIZE 30
 
 struct dp_hdcp_dev {
@@ -200,12 +204,131 @@ struct dp_display_private {
 	bool process_hpd_connect;
 
 	struct notifier_block usb_nb;
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	u32 dp_stop_state;
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 };
 
 static const struct of_device_id dp_dt_match[] = {
 	{.compatible = "qcom,dp-display"},
 	{}
 };
+
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+static ssize_t dp_display_dp_stop_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct dp_display_private *dp;
+
+	if (dev == NULL) {
+		pr_err("invalid dev\n");
+		return -EINVAL;
+	}
+
+	dp = dev_get_drvdata(dev);
+	if (dp == NULL) {
+		pr_err("no driver data found\n");
+		return -ENODEV;
+	}
+
+	return scnprintf(buf, PAGE_SIZE, "%08x\n", dp->dp_stop_state);
+}
+
+static void dp_display_host_deinit(struct dp_display_private *dp);
+static void dp_display_disconnect_sync(struct dp_display_private *dp);
+
+static ssize_t dp_display_dp_stop_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct dp_display_private *dp;
+
+	if (dev == NULL) {
+		pr_err("invalid dev\n");
+		return -EINVAL;
+	}
+
+	dp = dev_get_drvdata(dev);
+	if (dp == NULL) {
+		pr_err("no driver data found\n");
+		return -ENODEV;
+	}
+
+	if (kstrtou32(buf, 0, &dp->dp_stop_state) < 0) {
+		pr_err("sscanf failed to set dp_stop_state\n");
+		return -EINVAL;
+	}
+	pr_debug("dp_stop_state = %08x\n", dp->dp_stop_state);
+
+	/* Stop DP by Thermal client */
+	if (dp->hpd->hpd_high) {
+		pr_debug("disconnect DP by Thermal client\n");
+		dp_display_disconnect_sync(dp);
+
+		mutex_lock(&dp->session_lock);
+		dp_display_host_deinit(dp);
+		dp_display_state_remove(DP_STATE_CONFIGURED);
+		mutex_unlock(&dp->session_lock);
+		
+		if (!dp->debug->sim_mode && !dp->parser->no_aux_switch
+		    && !dp->parser->gpio_aux_switch)
+			dp->aux->aux_switch(dp->aux, false, ORIENTATION_NONE);
+	}
+
+	return count;
+}
+
+static struct device_attribute dp_attributes[] = {
+	__ATTR(dp_is_stopped, 0664,
+		dp_display_dp_stop_show,
+		dp_display_dp_stop_store),
+};
+
+static int dp_display_register_attributes(struct device *dev)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(dp_attributes); i++)
+		if (device_create_file(dev, dp_attributes + i))
+			goto error;
+	return 0;
+
+error:
+	dev_err(dev, "%s: Unable to create interface\n", __func__);
+
+	for (--i; i >= 0 ; i--)
+		device_remove_file(dev, dp_attributes + i);
+	return -ENODEV;
+}
+
+int dp_display_create_fs(struct dp_display_private *dp)
+{
+	int rc = 0;
+	char *path_name = "drm_dp";
+
+	if (dp == NULL) {
+		pr_err("no driver data found\n");
+		return -ENODEV;
+	}
+
+	dev_set_name(&virtualdev, "%s", path_name);
+
+	rc = device_register(&virtualdev);
+	if (rc) {
+		pr_err("%s: device_register failed rc = %d\n", __func__, rc);
+		goto err;
+	}
+
+	rc = dp_display_register_attributes(&virtualdev);
+	if (rc) {
+		device_unregister(&virtualdev);
+		goto err;
+	}
+	dev_set_drvdata(&virtualdev, dp);
+
+err:
+	return rc;
+}
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 static inline bool dp_display_is_hdcp_enabled(struct dp_display_private *dp)
 {
@@ -1053,21 +1176,16 @@ error_ctrl:
 	return rc;
 }
 
-static int dp_display_host_ready(struct dp_display_private *dp)
+static void dp_display_host_ready(struct dp_display_private *dp)
 {
-	int rc = 0;
-
 	if (!dp_display_state_is(DP_STATE_INITIALIZED)) {
-		rc = dp_display_host_init(dp);
-		if (rc) {
-			dp_display_state_show("[not initialized]");
-			return rc;
-		}
+		dp_display_state_show("[not initialized]");
+		return;
 	}
 
 	if (dp_display_state_is(DP_STATE_READY)) {
 		dp_display_state_log("[already ready]");
-		return rc;
+		return;
 	}
 
 	/*
@@ -1095,7 +1213,6 @@ static int dp_display_host_ready(struct dp_display_private *dp)
 	dp_display_state_add(DP_STATE_READY);
 	/* log this as it results from user action of cable connection */
 	DP_INFO("[OK]\n");
-	return rc;
 }
 
 static void dp_display_host_unready(struct dp_display_private *dp)
@@ -1198,11 +1315,7 @@ static int dp_display_process_hpd_high(struct dp_display_private *dp)
 		dp_display_state_remove(DP_STATE_SRC_PWRDN);
 	}
 
-	rc = dp_display_host_ready(dp);
-	if (rc) {
-		dp_display_state_show("[ready failed]");
-		goto end;
-	}
+	dp_display_host_ready(dp);
 
 	dp->link->psm_config(dp->link, &dp->panel->link_info, false);
 	dp->debug->psm_enabled = false;
@@ -1351,6 +1464,14 @@ static int dp_display_usbpd_configure_cb(struct device *dev)
 		DP_ERR("no driver data found\n");
 		return -ENODEV;
 	}
+
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	/* check for stop_state */
+	if (dp->dp_stop_state) {
+		pr_info("dp is stopped (state=%08x)\n", dp->dp_stop_state);
+		return 0;
+	}
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 	if (!dp->debug->sim_mode && !dp->parser->no_aux_switch
 	    && !dp->parser->gpio_aux_switch) {
@@ -1740,6 +1861,14 @@ static int dp_display_usbpd_attention_cb(struct device *dev)
 		return -ENODEV;
 	}
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	/* check for stop_state */
+	if (dp->dp_stop_state) {
+		pr_info("dp is stopped (state=%08x)\n",	dp->dp_stop_state);
+		return 0;
+	}
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 	DP_DEBUG("hpd_irq:%d, hpd_high:%d, power_on:%d, is_connected:%d\n",
 			dp->hpd->hpd_irq, dp->hpd->hpd_high,
 			!!dp_display_state_is(DP_STATE_ENABLED),
@@ -2093,6 +2222,14 @@ static int dp_display_post_init(struct dp_display *dp_display)
 		goto end;
 	}
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	rc = dp_display_create_fs(dp);
+	if (rc) {
+		pr_err("sysfs create dir failed, rc = %d\n", rc);
+		goto end;
+	}
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 	rc = dp_init_sub_modules(dp);
 	if (rc)
 		goto end;
@@ -2219,12 +2356,7 @@ static int dp_display_prepare(struct dp_display *dp_display, void *panel)
 	}
 
 	/* For supporting DP_PANEL_SRC_INITIATED_POWER_DOWN case */
-	rc = dp_display_host_ready(dp);
-
-	if (rc) {
-		dp_display_state_show("[ready failed]");
-		goto end;
-	}
+	dp_display_host_ready(dp);
 
 	if (dp->debug->psm_enabled) {
 		dp->link->psm_config(dp->link, &dp->panel->link_info, false);
@@ -2709,17 +2841,12 @@ static int dp_display_validate_pixel_clock(struct dp_display_mode dp_mode,
 	return 0;
 }
 
-static int dp_display_validate_topology(struct dp_display_private *dp,
-		struct dp_panel *dp_panel, struct drm_display_mode *mode,
-		struct dp_display_mode *dp_mode,
+static int dp_display_validate_mixers(struct msm_drm_private *priv,
+		struct drm_display_mode *mode,
 		const struct msm_resource_caps_info *avail_res)
 {
 	int rc;
-	struct msm_drm_private *priv = dp->priv;
-	const u32 dual = 2, quad = 4;
-	u32 num_lm = 0, num_dsc = 0, num_3dmux = 0;
-	bool dsc_capable = dp_mode->capabilities & DP_PANEL_CAPS_DSC;
-	u32 fps = dp_mode->timing.refresh_rate;
+	u32 num_lm = 0;
 
 	rc = msm_get_mixer_count(priv, mode, avail_res, &num_lm);
 	if (rc) {
@@ -2727,41 +2854,76 @@ static int dp_display_validate_topology(struct dp_display_private *dp,
 		return rc;
 	}
 
-	/* Merge using DSC, if enabled */
+	if (num_lm > avail_res->num_lm) {
+		DP_DEBUG("num lm:%d > available lm:%d\n", num_lm,
+				avail_res->num_lm);
+		return -EPERM;
+	}
+
+	return 0;
+}
+
+static int dp_display_validate_dscs(struct msm_drm_private *priv,
+		struct dp_panel *dp_panel, struct drm_display_mode *mode,
+		struct dp_display_mode *dp_mode,
+		const struct msm_resource_caps_info *avail_res)
+{
+	int rc;
+	u32 num_dsc = 0;
+	bool dsc_capable = dp_mode->capabilities & DP_PANEL_CAPS_DSC;
+
+	if (!dp_panel->dsc_en || !dsc_capable)
+		return 0;
+
+	rc = msm_get_dsc_count(priv, mode->hdisplay, &num_dsc);
+	if (rc) {
+		DP_ERR("error getting dsc count. rc:%d\n", rc);
+		return rc;
+	}
+
+	if (num_dsc > avail_res->num_dsc) {
+		DP_DEBUG("num dsc:%d > available dsc:%d\n", num_dsc,
+				avail_res->num_dsc);
+		return -EPERM;
+	}
+
+	return 0;
+}
+
+static int dp_display_validate_topology(struct dp_display_private *dp,
+		struct dp_panel *dp_panel, struct drm_display_mode *mode,
+		struct dp_display_mode *dp_mode,
+		const struct msm_resource_caps_info *avail_res)
+{
+	int rc;
+	struct msm_drm_private *priv = dp->priv;
+	const u32 dual_lm = 2, quad_lm = 4;
+	u32 num_lm = 0, num_dsc = 0, num_3dmux = 0;
+	bool dsc_capable = dp_mode->capabilities & DP_PANEL_CAPS_DSC;
+
+	rc = msm_get_mixer_count(priv, mode, avail_res, &num_lm);
+	if (rc) {
+		DP_ERR("error getting mixer count. rc:%d\n", rc);
+		return rc;
+	}
+
+	num_3dmux = avail_res->num_3dmux;
+
 	if (dp_panel->dsc_en && dsc_capable) {
 		rc = msm_get_dsc_count(priv, mode->hdisplay, &num_dsc);
 		if (rc) {
 			DP_ERR("error getting dsc count. rc:%d\n", rc);
 			return rc;
 		}
-
-		/* Only DSCMERGE is supported on DP */
-		num_lm  = max(num_lm, num_dsc);
-		num_dsc = max(num_lm, num_dsc);
-	} else {
-		num_3dmux = avail_res->num_3dmux;
 	}
 
-	if (num_lm > avail_res->num_lm) {
-		DP_DEBUG("mode %sx%d is invalid, not enough lm %d %d\n",
-				mode->name, fps, num_lm, num_lm, avail_res->num_lm);
-		return -EPERM;
-	} else if (num_dsc > avail_res->num_dsc) {
-		DP_DEBUG("mode %sx%d is invalid, not enough dsc %d %d\n",
-				mode->name, fps, num_dsc, avail_res->num_dsc);
-		return -EPERM;
-	} else if (!num_dsc && (num_lm == dual && !num_3dmux)) {
-		DP_DEBUG("mode %sx%d is invalid, not enough 3dmux %d %d\n",
-				mode->name, fps, num_3dmux, avail_res->num_3dmux);
-		return -EPERM;
-	} else if (num_lm == quad && num_dsc != quad)  {
-		DP_DEBUG("mode %sx%d is invalid, unsupported DP topology lm:%d dsc:%d\n",
-				mode->name, fps, num_lm, num_dsc);
+	/* filter out unsupported DP topologies */
+	if ((num_lm == dual_lm && (!num_3dmux && !num_dsc)) ||
+			(num_lm == quad_lm && (num_dsc != 4))) {
+		DP_DEBUG("invalid topology lm:%d dsc:%d 3dmux:%d intf:1\n",
+				num_lm, num_dsc, num_3dmux);
 		return -EPERM;
 	}
-
-	DP_DEBUG("mode %sx%d is valid, supported DP topology lm:%d dsc:%d 3dmux:%d\n",
-				mode->name, fps, num_lm, num_dsc, num_3dmux);
 
 	return 0;
 }
@@ -2832,6 +2994,67 @@ static void dp_display_validate_mst_connectors(struct dp_debug *debug,
 	*use_default = true;
 }
 
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+static uint dp_validate_mode;
+module_param_named(dp_validate_mode, dp_validate_mode, uint, 0644);
+MODULE_PARM_DESC(dp_validate_mode, "dp validate mode");
+
+static enum drm_mode_status dp_validate_mode_ext(
+				struct drm_display_mode *mode)
+{
+	enum drm_mode_status mode_status = MODE_BAD;
+
+	switch (dp_validate_mode) {
+	case 0: /* default valid for Preferred or multi of 30Hz */
+		if (mode->vrefresh % 30 == 0)
+			mode_status = MODE_OK;
+		break;
+	case 1: /* valid for up to FHD/multi of 60Hz and higher */
+		mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+		if (mode->hdisplay <= 1920 &&
+		    mode->vrefresh % 60 == 0 && mode->vrefresh >= 60)
+			mode_status = MODE_OK;
+		break;
+	case 2: /* valid for any reso/60Hz only */
+		mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+		if (mode->vrefresh == 60)
+			mode_status = MODE_OK;
+		break;
+	case 3: /* valid for up to FHD/60Hz only */
+		mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+		if (mode->hdisplay <= 1920 &&
+		    mode->vrefresh == 60)
+			mode_status = MODE_OK;
+		break;
+	case 4: /* valid for 24 Hz only (Test) */
+		mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+		if (mode->vrefresh == 24)
+			mode_status = MODE_OK;
+		break;
+	case 5: /* valid for 25 Hz only (Test) */
+		mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+		if (mode->vrefresh == 25)
+			mode_status = MODE_OK;
+		break;
+	case 6: /* valid for 30 Hz only (Test) */
+		mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+		if (mode->vrefresh == 30)
+			mode_status = MODE_OK;
+		break;
+	case 7: /* valid for 144 Hz only (Test) */
+		mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+		if (mode->vrefresh == 144)
+			mode_status = MODE_OK;
+		break;
+	default:
+		mode_status =  MODE_OK;
+		break;
+	}
+
+	return mode_status;
+}
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
+
 static enum drm_mode_status dp_display_validate_mode(
 		struct dp_display *dp_display,
 		void *panel, struct drm_display_mode *mode,
@@ -2875,6 +3098,15 @@ static enum drm_mode_status dp_display_validate_mode(
 	if (rc)
 		goto end;
 
+	rc = dp_display_validate_mixers(dp->priv, mode, avail_res);
+	if (rc)
+		goto end;
+
+	rc = dp_display_validate_dscs(dp->priv, panel, mode, &dp_mode,
+			avail_res);
+	if (rc)
+		goto end;
+
 	rc = dp_display_validate_topology(dp, dp_panel, mode,
 			&dp_mode, avail_res);
 	if (rc)
@@ -2891,7 +3123,11 @@ static enum drm_mode_status dp_display_validate_mode(
 			mode->picture_aspect_ratio != debug->aspect_ratio))
 		goto end;
 
-	mode_status = MODE_OK;
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	mode_status = dp_validate_mode_ext(mode);
+#else
+ 	mode_status = MODE_OK;
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 end:
 	mutex_unlock(&dp->session_lock);
 	DP_DEBUG("[%s] mode is %s\n", mode->name,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  */
 
 
@@ -511,29 +511,6 @@ u64 dsi_drm_find_bit_clk_rate(void *display,
 	return bit_clk_rate;
 }
 
-int dsi_conn_get_lm_from_mode(void *display, const struct drm_display_mode *drm_mode)
-{
-	struct dsi_display *dsi_display = display;
-	struct dsi_display_mode dsi_mode, *panel_dsi_mode;
-	int rc = -EINVAL;
-
-	if (!dsi_display || !drm_mode) {
-		DSI_ERR("Invalid params %d %d\n", !display, !drm_mode);
-		return rc;
-	}
-
-	convert_to_dsi_mode(drm_mode, &dsi_mode);
-
-	rc = dsi_display_find_mode(dsi_display, &dsi_mode, &panel_dsi_mode);
-	if (rc) {
-		DSI_ERR("mode not found %d\n", rc);
-		drm_mode_debug_printmodeline(drm_mode);
-		return rc;
-	}
-
-	return panel_dsi_mode->priv_info->topology.num_lm;
-}
-
 int dsi_conn_get_mode_info(struct drm_connector *connector,
 		const struct drm_display_mode *drm_mode,
 		struct msm_mode_info *mode_info,
@@ -952,6 +929,11 @@ int dsi_connector_get_modes(struct drm_connector *connector, void *data,
 			m->type |= DRM_MODE_TYPE_PREFERRED;
 		}
 		drm_mode_probed_add(connector, m);
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+		if (modes[i].default_timing)
+			drm_set_preferred_mode(
+				connector, m->hdisplay, m->vdisplay);
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 	}
 
 	rc = dsi_drm_update_edid_name(&edid, display->panel->name);
@@ -1080,24 +1062,14 @@ int dsi_conn_post_kickoff(struct drm_connector *connector,
 			return -EINVAL;
 		}
 
-		/*
-		 * When both DFPS and dynamic clock switch with constant
-		 * fps features are enabled, wait for dynamic refresh done
-		 * only in case of clock switch.
-		 * In case where only fps changes, clock remains same.
-		 * So, wait for dynamic refresh done is not required.
-		 */
 		if ((ctrl_version >= DSI_CTRL_VERSION_2_5) &&
-			(dyn_clk_caps->maintain_const_fps) &&
-			(adj_mode.dsi_mode_flags & DSI_MODE_FLAG_DYN_CLK)) {
+				(dyn_clk_caps->maintain_const_fps)) {
 			display_for_each_ctrl(i, display) {
 				ctrl = &display->ctrl[i];
 				rc = dsi_ctrl_wait4dynamic_refresh_done(
 						ctrl->ctrl);
 				if (rc)
 					DSI_ERR("wait4dfps refresh failed\n");
-				dsi_display_dfps_update_parent(display);
-				dsi_phy_dynamic_refresh_clear(ctrl->phy);
 			}
 		}
 

@@ -50,22 +50,12 @@ ifeq ($(CONFIG_ARCH_BENGAL), y)
 LINUXINCLUDE    += -include $(srctree)/techpack/display/config/bengaldispconf.h
 endif
 
-ifeq ($(CONFIG_ARCH_MONACO), y)
-include $(srctree)/techpack/display/config/monacodisp.conf
+ifeq ($(CONFIG_ARCH_SONY_SAGAMI), y)
+	include $(srctree)/techpack/display/config/sagamidisp.conf
 endif
 
-ifeq ($(CONFIG_ARCH_MONACO), y)
-LINUXINCLUDE    += -include $(srctree)/techpack/display/config/monacodispconf.h
+ifeq ($(CONFIG_ARCH_SONY_SAGAMI), y)
+	LINUXINCLUDE    += -include $(srctree)/techpack/display/config/sagamidispconf.h
 endif
 
 obj-$(CONFIG_DRM_MSM) += msm/
-
-ifeq ($(CONFIG_ARCH_SDXLEMUR), y)
-include $(srctree)/techpack/display/config/sdxlemurdisp.conf
-endif
-
-ifeq ($(CONFIG_ARCH_SDXLEMUR), y)
-LINUXINCLUDE    += -include $(srctree)/techpack/display/config/sdxlemurdispconf.h
-endif
-
-obj-$(CONFIG_DRM_QPIC_DISPLAY) += tinydrm/

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _DSI_DEFS_H_
@@ -286,6 +286,17 @@ enum dsi_cmd_set_type {
 	DSI_CMD_SET_POST_TIMING_SWITCH,
 	DSI_CMD_SET_QSYNC_ON,
 	DSI_CMD_SET_QSYNC_OFF,
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	DSI_CMD_SET_FLM2_ON,
+	DSI_CMD_SET_FLM2_OFF,
+	DSI_CMD_SET_HBM_ON,
+	DSI_CMD_SET_HBM_OFF,
+	DSI_CMD_SET_AOD_LOW,
+	DSI_CMD_SET_AOD_HIGH,
+	DSI_CMD_SET_HMD_MODE1,
+	DSI_CMD_SET_HMD_MODE2,
+	DSI_CMD_SET_HMD_OFF,
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 	DSI_CMD_SET_MAX
 };
 
@@ -542,17 +553,12 @@ struct dsi_video_engine_cfg {
  * @wr_mem_continue:               DCS command for write_memory_continue.
  * @insert_dcs_command:            Insert DCS command as first byte of payload
  *                                 of the pixel data.
- * @mdp_idle_ctrl_en:		Enable idle insertion between command mode mdp packets.
- * @mdp_idle_ctrl_len:		No. of dsi pclk cycles of idle time to insert between
- *				   command mode mdp packets.
  */
 struct dsi_cmd_engine_cfg {
 	u32 max_cmd_packets_interleave;
 	u32 wr_mem_start;
 	u32 wr_mem_continue;
 	bool insert_dcs_command;
-	bool mdp_idle_ctrl_en;
-	u32 mdp_idle_ctrl_len;
 };
 
 /**
@@ -645,6 +651,9 @@ struct dsi_display_mode {
 	enum dsi_op_mode panel_mode;
 	bool is_preferred;
 	struct dsi_display_mode_priv_info *priv_info;
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+	bool default_timing;
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 };
 
 /**

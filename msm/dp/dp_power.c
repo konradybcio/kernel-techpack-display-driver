@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -212,22 +212,20 @@ static int dp_power_clk_init(struct dp_power_private *power, bool enable)
 
 		power->pixel_parent = clk_get(dev, "pixel_parent");
 		if (IS_ERR(power->pixel_parent)) {
-			DP_ERR("Unable to get DP pixel RCG parent: %d\n",
+			DP_DEBUG("Unable to get DP pixel RCG parent: %d\n",
 					PTR_ERR(power->pixel_parent));
 			rc = PTR_ERR(power->pixel_parent);
 			power->pixel_parent = NULL;
 			goto err_pixel_parent;
 		}
 
-		if (power->parser->has_mst) {
-			power->pixel1_clk_rcg = clk_get(dev, "pixel1_clk_rcg");
-			if (IS_ERR(power->pixel1_clk_rcg)) {
-				DP_ERR("Unable to get DP pixel1 clk RCG: %d\n",
-						PTR_ERR(power->pixel1_clk_rcg));
-				rc = PTR_ERR(power->pixel1_clk_rcg);
-				power->pixel1_clk_rcg = NULL;
-				goto err_pixel1_clk_rcg;
-			}
+		power->pixel1_clk_rcg = clk_get(dev, "pixel1_clk_rcg");
+		if (IS_ERR(power->pixel1_clk_rcg)) {
+			DP_DEBUG("Unable to get DP pixel1 clk RCG: %d\n",
+					PTR_ERR(power->pixel1_clk_rcg));
+			rc = PTR_ERR(power->pixel1_clk_rcg);
+			power->pixel1_clk_rcg = NULL;
+			goto err_pixel1_clk_rcg;
 		}
 	} else {
 		if (power->pixel1_clk_rcg)
@@ -435,6 +433,10 @@ static void dp_power_set_gpio(struct dp_power_private *power, bool flip)
 	for (i = 0; i < mp->num_gpio; i++) {
 		if (dp_power_find_gpio(config->gpio_name, "aux-sel"))
 			config->value = flip;
+#ifdef CONFIG_DRM_SDE_SPECIFIC_PANEL
+		if (dp_power_find_gpio(config->gpio_name, "aux-en"))
+			config->value = 1;
+#endif /* CONFIG_DRM_SDE_SPECIFIC_PANEL */
 
 		if (gpio_is_valid(config->gpio)) {
 			DP_DEBUG("gpio %s, value %d\n", config->gpio_name,
